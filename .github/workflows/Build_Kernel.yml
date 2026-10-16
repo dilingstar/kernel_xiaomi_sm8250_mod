@@ -227,29 +227,42 @@ jobs:
 
           # 'builtin' only ships drivers/kernelsu/. Its hook call sites
           # (execveat / faccessat / stat / read / input / devpts) must be added to
-          # the core kernel source. Path '4.19/' is hard-coded: apollo is 4.19.325.
+          # the core kernel source. Without them the kernel fails to link with
+          # undefined references to ksu_handle_execveat / _stat / _faccessat.
+          # Path '4.19/' is hard-coded: apollo is 4.19.325.
           PATCH_URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/4.19/ksu_hooks_sukisu_4.19.patch"
           curl -LSs "$PATCH_URL" -o /tmp/ksu_hooks_419.patch
           echo "patch size: $(wc -c < /tmp/ksu_hooks_419.patch) bytes"
-
-          if patch -p1 --dry-run --reverse < /tmp/ksu_hooks_419.patch >/dev/null 2>&1; then
-            echo "Hooks patch already applied - skipping."
-          else
-            if patch -p1 --forward --dry-run < /tmp/ksu_hooks_419.patch; then
-              patch -p1 --forward < /tmp/ksu_hooks_419.patch
-              echo "KernelSU manual hooks patch applied"
-            else
-              echo "ERROR: hooks patch does not apply to this tree. Hunks:"
-              grep -n -m 40 '^@@' /tmp/ksu_hooks_419.patch
-              exit 1
-            fi
+          if [ ! -s /tmp/ksu_hooks_419.patch ]; then
+            echo "ERROR: hooks patch download failed or empty: $PATCH_URL"
+            exit 1
           fi
 
-          for symbol in ksu_handle_execveat ksu_handle_stat ksu_handle_faccessat; do
-            if grep -rq "$symbol" "$KERNEL_SOURCE/fs" 2>/dev/null; then
-              echo "  OK: $symbol referenced in fs/"
+          # Bail out before the 10-minute build if the call sites are missing.
+          # --fuzz=0 matters: the default fuzzy matching produced a false
+          # "already applied" positive and made this step a no-op.
+          if grep -q 'ksu_handle_execveat' fs/exec.c; then
+            echo "Hooks already present in fs/exec.c - skipping apply."
+          elif patch -p1 --forward --dry-run --fuzz=0 < /tmp/ksu_hooks_419.patch; then
+            patch -p1 --forward --fuzz=0 < /tmp/ksu_hooks_419.patch
+            echo "KernelSU manual hooks patch applied"
+          else
+            echo "ERROR: hooks patch does not apply cleanly to this tree."
+            echo "--- first hunks ---"
+            grep -n -m 40 '^@@' /tmp/ksu_hooks_419.patch
+            echo "--- patch --dry-run output ---"
+            patch -p1 --forward --dry-run --fuzz=0 < /tmp/ksu_hooks_419.patch 2>&1 | head -40
+            exit 1
+          fi
+
+          echo "--- hook call sites now present in fs/ ---"
+          for pair in "ksu_handle_execveat:fs/exec.c" "ksu_handle_stat:fs/stat.c" "ksu_handle_faccessat:fs/open.c"; do
+            symbol="${pair%%:*}"
+            file="${pair##*:}"
+            if grep -q "$symbol" "$file"; then
+              echo "  OK: $symbol in $file"
             else
-              echo "  FAIL: $symbol NOT found in fs/ - hooks did not land"
+              echo "  FAIL: $symbol NOT in $file"
               exit 1
             fi
           done
@@ -502,15 +515,29 @@ jobs:
 
           # 开始构建
           echo "🚀 Start building the kernel... (开始构建内核)"
-          make $MAKE_ARGS -j$(nproc --all) 2>&1 | tee build.log
-            
+          # Keep stderr in its own file: the kernel writes the actual error there,
+          # and "2>&1 | tee" buries it somewhere in the middle of the log (that is
+          # why a previous run looked like a bare "Error 2" with no cause).
+          set +e
+          make $MAKE_ARGS -j$(nproc --all) 2> >(tee build.err.log >&2) | tee build.log
+          MAKE_RC=${PIPESTATUS[0]}
+          echo "make exit code: $MAKE_RC"
+          set -e
+
           # 验证构建结果
-          if [ -f "$KERNEL_SOURCE/out/arch/arm64/boot/Image" ]; then
+          if [ "$MAKE_RC" -eq 0 ] && [ -f "$KERNEL_SOURCE/out/arch/arm64/boot/Image" ]; then
               echo "✅ Kernel Build Successful (内核构建成功)"
           else
               echo "❌ Kernel build failure (内核构建失败)"
-              echo "error log (错误日志):"
-              tail -n 100 build.log
+              echo "=========== compiler / linker diagnostics (build.err.log) ==========="
+              if [ -s build.err.log ]; then
+                grep -nE 'error:|Error [0-9]+|undefined reference|No rule to make target|fatal error' build.err.log | tail -60 || true
+                echo "----------------- last 60 stderr lines -----------------"
+                tail -n 60 build.err.log
+              else
+                echo "(build.err.log empty - falling back to build.log)"
+                tail -n 100 build.log
+              fi
               exit 1
           fi
             
