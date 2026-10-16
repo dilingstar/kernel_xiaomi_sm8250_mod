@@ -34,15 +34,10 @@ on:
           - 'MIUI'
           - 'AOSP'
       kernelsu_variant:
-        description: 'KernelSU variants (KernelSU 版本)'
+        description: 'KernelSU variant (KernelSU 版本) — 一次只填一个;要测两个就分两次 Run workflow'
         required: true
-        type: choice
+        type: string
         default: 'SukiSU-Ultra'
-        options:
-          - 'SukiSU-Ultra'
-          - 'RKSU'
-          - 'KernelSU'
-          - 'None'
       kpm_enable:
         description: 'Is KPM support enabled? (是否启用 KPM 支持?)'
         required: true
@@ -79,6 +74,7 @@ jobs:
           fi
           DEVICES_JSON="[$(echo $DEVICES | sed 's/,/","/g' | sed 's/.*/"&"/')]"
           echo "matrix={\"device\":$DEVICES_JSON}" >> $GITHUB_OUTPUT
+          echo "devices: $DEVICES_JSON"
 
   build:
     needs: prepare
@@ -204,9 +200,38 @@ jobs:
           echo "⚙️ Configure KernelSU Variants: $KSU_VARIANT (配置 KernelSU 变体: $KSU_VARIANT)"
           
           if [ "$KSU_VARIANT" == "SukiSU-Ultra" ]; then
-            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+            # Pinned to SukiSU-Ultra v3.1.8 (commit b8b7534). Do NOT go back to
+            # setup.sh: it checks out "the latest tag" via git describe, which left
+            # the tree in a mismatched state and produced undeclared-identifier
+            # errors (ksu_manager_cmd / KSU_FEATURE_SELINUX_HIDE / KSU_IOCTL_KPM).
+            # v3.1.8 is the flat legacy layout that the SUSFS 4.19 patches target,
+            # and its Kconfig has no >=5.10-only feature ids.
+            KSU_SHA="b8b75349e01d2cfa00496b72795bb185b9c2ae4b"
+            rm -rf /tmp/ksu
+            git clone --filter=blob:none --no-checkout https://github.com/SukiSU-Ultra/SukiSU-Ultra /tmp/ksu
+            git -C /tmp/ksu checkout "$KSU_SHA"
+            echo "SukiSU-Ultra pinned at $(git -C /tmp/ksu rev-parse --short HEAD)"
+            ln -sfn /tmp/ksu/kernel "$KERNEL_SOURCE/drivers/kernelsu"
+            grep -q 'drivers/kernelsu/Kconfig' "$KERNEL_SOURCE/drivers/Kconfig" || \
+              sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' "$KERNEL_SOURCE/drivers/Kconfig"
+            grep -q 'kernelsu' "$KERNEL_SOURCE/drivers/Makefile" || \
+              printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$KERNEL_SOURCE/drivers/Makefile"
+            echo "symlink: $(readlink "$KERNEL_SOURCE/drivers/kernelsu")"
+            ls "$KERNEL_SOURCE/drivers/kernelsu" | head -5
           elif [ "$KSU_VARIANT" == "RKSU" ]; then
-            curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/susfs-v1.5.5/kernel/setup.sh" | bash -s susfs-v1.5.5
+            # Branch pinned explicitly: susfs-v1.5.5 is gone (404) and
+            # deprecated/susfs-* are abandoned upstream. Only susfs-rksu-master is live.
+            RKSU_SHA="9b28326af4145974560122644e87fc9a021a2cce"
+            rm -rf /tmp/ksu
+            git clone --filter=blob:none --no-checkout https://github.com/rsuntk/KernelSU /tmp/ksu
+            git -C /tmp/ksu fetch --depth=1 origin "$RKSU_SHA"
+            git -C /tmp/ksu checkout "$RKSU_SHA"
+            echo "RKSU pinned at $(git -C /tmp/ksu rev-parse --short HEAD)"
+            ln -sfn /tmp/ksu/kernel "$KERNEL_SOURCE/drivers/kernelsu"
+            grep -q 'drivers/kernelsu/Kconfig' "$KERNEL_SOURCE/drivers/Kconfig" || \
+              sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' "$KERNEL_SOURCE/drivers/Kconfig"
+            grep -q 'kernelsu' "$KERNEL_SOURCE/drivers/Makefile" || \
+              printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$KERNEL_SOURCE/drivers/Makefile"
           elif [ "$KSU_VARIANT" == "KernelSU" ]; then
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
           else
@@ -215,13 +240,77 @@ jobs:
           
           echo "✅ KernelSU configuration complete (KernelSU 配置完成)"
           
+      - name: 🌿 Integrating SUSFS kernel patches (集成 SUSFS 内核补丁)
+        run: |
+          cd "$KERNEL_SOURCE"
+          KSU_VARIANT="${{ github.event.inputs.kernelsu_variant }}"
+
+          if [ "$KSU_VARIANT" != "SukiSU-Ultra" ] && [ "$KSU_VARIANT" != "RKSU" ]; then
+            echo "Skipped: SUSFS integration is only wired for SukiSU-Ultra / RKSU."
+            exit 0
+          fi
+
+          # KernelSU PR 191 forces userspace to map user data as rw, and group 4
+          # then shares it read-only. SUSFS requires this revert.
+          echo "--- reverting KernelSU PR 191 (898e9d4f) ---"
+          git -C /tmp/ksu revert --no-edit 898e9d4f8ca9b2f46b0c6b36b80a872b5b88d899 || \
+            echo "NOTE: revert did not apply cleanly - continuing, verify later if su misbehaves"
+
+          echo "--- cloning susfs4ksu branch kernel-4.19 ---"
+          rm -rf /tmp/susfs4ksu
+          git clone --depth=1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu /tmp/susfs4ksu
+          ls /tmp/susfs4ksu/kernel_patches
+
+          # Copy the shipped fs/ and include/ sources BEFORE patching, because
+          # 50_add_susfs_in_kernel only wires up existing files.
+          cp -v /tmp/susfs4ksu/kernel_patches/fs/susfs.c "$KERNEL_SOURCE/fs/susfs.c"
+          cp -v /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h "$KERNEL_SOURCE/include/linux/susfs.h"
+          echo "SUSFS_VERSION: $(grep -m1 SUSFS_VERSION "$KERNEL_SOURCE/include/linux/susfs.h" || echo unknown)"
+
+          # 50_... is applied from the kernel root with -p1, so the patch file has
+          # to sit here first.
+          cp -v /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch "$KERNEL_SOURCE/"
+          cp -v /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch /tmp/ksu/
+
+          echo "--- applying 10_enable_susfs_for_ksu.patch (KernelSU side) ---"
+          if grep -q 'susfs' /tmp/ksu/kernel/Makefile 2>/dev/null; then
+            echo "already applied - skipping"
+          elif ( cd /tmp/ksu && patch -p1 --forward --fuzz=0 < 10_enable_susfs_for_ksu.patch ); then
+            echo "KernelSU SUSFS patch applied"
+          else
+            echo "ERROR: 10_enable_susfs_for_ksu.patch failed against SukiSU v3.1.8."
+            echo "--- hunks ---"
+            grep -n -m 40 '^@@' /tmp/ksu/10_enable_susfs_for_ksu.patch
+            ( cd /tmp/ksu && patch -p1 --forward --fuzz=0 --dry-run < 10_enable_susfs_for_ksu.patch 2>&1 | head -40 ) || true
+            exit 1
+          fi
+
+          echo "--- applying 50_add_susfs_in_kernel-4.19.patch (kernel side) ---"
+          if grep -q 'susfs_start_sdcard_monitor_fn' fs/namespace.c 2>/dev/null; then
+            echo "already applied - skipping"
+          elif patch -p1 --forward --fuzz=0 < 50_add_susfs_in_kernel-4.19.patch; then
+            echo "kernel SUSFS patch applied"
+          else
+            echo "ERROR: 50_add_susfs_in_kernel-4.19.patch failed. Failed hunks:"
+            find . -name '*.rej' -not -path './out/*' | head -20
+            echo "--- hunks ---"
+            grep -n -m 60 '^@@' 50_add_susfs_in_kernel-4.19.patch
+            ( patch -p1 --forward --fuzz=0 --dry-run < 50_add_susfs_in_kernel-4.19.patch 2>&1 | head -40 ) || true
+            exit 1
+          fi
+
+          echo "--- SUSFS landing check ---"
+          grep -q 'SUSFS_VERSION' include/linux/susfs.h && echo "  OK: include/linux/susfs.h"
+          grep -q 'susfs_start_sdcard_monitor_fn' fs/namespace.c && echo "  OK: fs/namespace.c hook"
+          grep -q 'susfs' fs/Makefile && echo "  OK: fs/Makefile entry"
+
       - name: 🪝 Applying KernelSU manual hooks patch (应用 KernelSU 手动 Hook 补丁)
         run: |
           cd "$KERNEL_SOURCE"
           KSU_VARIANT="${{ github.event.inputs.kernelsu_variant }}"
 
-          if [ "$KSU_VARIANT" != "SukiSU-Ultra" ]; then
-            echo "Skipped: hook patch is only needed for the SukiSU-Ultra builtin branch."
+          if [ "$KSU_VARIANT" != "SukiSU-Ultra" ] && [ "$KSU_VARIANT" != "RKSU" ]; then
+            echo "Skipped: hook patch is only needed for SukiSU-Ultra / RKSU."
             exit 0
           fi
 
@@ -447,12 +536,14 @@ jobs:
                   -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
                   -e KSU_SUSFS_OPEN_REDIRECT \
                   -e KSU_SUSFS_SUS_MAP
-              # NOTE: KSU_MANUAL_HOOK no longer exists in SukiSU-Ultra (removed in both
-              #       branches). The 'builtin' branch supplies the manual hooks itself.
-              #       The other old KSU_SUSFS_* names (HAS_MAGIC_MOUNT, AUTO_ADD_*,
-              #       TRY_UMOUNT, SUS_OVERLAYFS, SUS_SU) were dropped upstream and are
-              #       rejected by scripts/config, so they are no longer requested here.
-              #       KSU_SUSFS itself depends on THREAD_INFO_IN_TASK (set in defconfig).
+              # NOTE: the KSU_SUSFS_* symbols only exist AFTER
+              #       50_add_susfs_in_kernel-4.19.patch has been applied (that patch
+              #       injects them into drivers/kernelsu/Kconfig). scripts/config
+              #       silently ignores symbols that do not exist, so entries that
+              #       the 4.19 SUSFS patch does not define are harmless here.
+              #       KSU itself (SukiSU v3.1.8 Kconfig) depends on OVERLAY_FS and
+              #       has KSU_KPROBES_HOOK / KSU_MANUAL_HOOK / KSU_TRACEPOINT_HOOK as
+              #       a choice; manual hooks are selected by the hooks patch step.
           elif [ "$KSU" == "KernelSU" ]; then
               echo "🔧 Applying KernelSU Configuration... (应用 KernelSU 配置)"
               scripts/config --file out/.config \
