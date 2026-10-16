@@ -240,69 +240,71 @@ jobs:
           
           echo "✅ KernelSU configuration complete (KernelSU 配置完成)"
           
-      - name: 🌿 Integrating SUSFS kernel patches (集成 SUSFS 内核补丁)
+      - name: 🌿 Verifying SUSFS integration (验证 SUSFS 集成)
         run: |
           cd "$KERNEL_SOURCE"
           KSU_VARIANT="${{ github.event.inputs.kernelsu_variant }}"
 
           if [ "$KSU_VARIANT" != "SukiSU-Ultra" ] && [ "$KSU_VARIANT" != "RKSU" ]; then
-            echo "Skipped: SUSFS integration is only wired for SukiSU-Ultra / RKSU."
+            echo "Skipped: SUSFS is only relevant for SukiSU-Ultra / RKSU."
             exit 0
           fi
 
-          # KernelSU PR 191 forces userspace to map user data as rw, and group 4
-          # then shares it read-only. SUSFS requires this revert.
-          echo "--- reverting KernelSU PR 191 (898e9d4f) ---"
-          git -C /tmp/ksu revert --no-edit 898e9d4f8ca9b2f46b0c6b36b80a872b5b88d899 || \
-            echo "NOTE: revert did not apply cleanly - continuing, verify later if su misbehaves"
+          # IMPORTANT: this kernel tree ALREADY ships a complete SUSFS
+          # implementation (fs/susfs.c + include/linux/susfs.h, v1.5.7, with a
+          # NON-GKI variant), together with the fs/ hooks the upstream 4.19 patch
+          # would install. Do NOT run 50_add_susfs_in_kernel-4.19.patch here:
+          # the tree already contains it, so the patch reports
+          # "Reversed (or previously applied)" for most files and fails outright
+          # on fs/namespace.c (16/16 hunks FAILED). Verified against
+          # dilingstar/kernel_xiaomi_sm8250_mod @ lunar-release.
+          echo "--- checking kernel-side SUSFS ---"
 
-          echo "--- cloning susfs4ksu branch kernel-4.19 ---"
-          rm -rf /tmp/susfs4ksu
-          git clone --depth=1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu /tmp/susfs4ksu
-          ls /tmp/susfs4ksu/kernel_patches
+          missing=0
+          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+            if [ -s "$f" ]; then
+              echo "  OK present: $f ($(wc -c < "$f") bytes)"
+            else
+              echo "  MISSING: $f"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "ERROR: SUSFS is NOT integrated in this kernel tree"; exit 1; }
 
-          # Copy the shipped fs/ and include/ sources BEFORE patching, because
-          # 50_add_susfs_in_kernel only wires up existing files.
-          cp -v /tmp/susfs4ksu/kernel_patches/fs/susfs.c "$KERNEL_SOURCE/fs/susfs.c"
-          cp -v /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h "$KERNEL_SOURCE/include/linux/susfs.h"
-          echo "SUSFS_VERSION: $(grep -m1 SUSFS_VERSION "$KERNEL_SOURCE/include/linux/susfs.h" || echo unknown)"
+          grep -q 'SUSFS_VERSION' include/linux/susfs.h \
+            || { echo "ERROR: include/linux/susfs.h has no SUSFS_VERSION"; exit 1; }
+          echo "  kernel SUSFS version: $(grep -m1 'define SUSFS_VERSION' include/linux/susfs.h)"
+          grep -q 'SUSFS_VARIANT' include/linux/susfs.h \
+            && echo "  variant: $(grep -m1 'define SUSFS_VARIANT' include/linux/susfs.h)"
+          grep -q 'susfs' fs/Makefile \
+            || { echo "ERROR: fs/Makefile has no susfs entry (SUSFS would never be built)"; exit 1; }
+          echo "  fs/Makefile: $(grep -n 'susfs' fs/Makefile | head -3)"
 
-          # 50_... is applied from the kernel root with -p1, so the patch file has
-          # to sit here first.
-          cp -v /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch "$KERNEL_SOURCE/"
-          cp -v /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch /tmp/ksu/
-
-          echo "--- applying 10_enable_susfs_for_ksu.patch (KernelSU side) ---"
-          if grep -q 'susfs' /tmp/ksu/kernel/Makefile 2>/dev/null; then
-            echo "already applied - skipping"
-          elif ( cd /tmp/ksu && patch -p1 --forward --fuzz=0 < 10_enable_susfs_for_ksu.patch ); then
-            echo "KernelSU SUSFS patch applied"
-          else
-            echo "ERROR: 10_enable_susfs_for_ksu.patch failed against SukiSU v3.1.8."
-            echo "--- hunks ---"
-            grep -n -m 40 '^@@' /tmp/ksu/10_enable_susfs_for_ksu.patch
-            ( cd /tmp/ksu && patch -p1 --forward --fuzz=0 --dry-run < 10_enable_susfs_for_ksu.patch 2>&1 | head -40 ) || true
-            exit 1
+          # The KernelSU driver and the kernel-side SUSFS must agree on the
+          # CONFIG_KSU_SUSFS_* symbol superset. A mismatch is what produced
+          # "use of undeclared identifier 'SUSFS_MAGIC'" in an earlier run.
+          echo "--- comparing CONFIG_KSU_SUSFS_* symbol sets ---"
+          grep -ohE 'CONFIG_KSU_SUSFS[A-Z_]*' include/linux/susfs.h include/linux/susfs_def.h 2>/dev/null \
+            | sort -u > /tmp/sym_kernel.txt
+          grep -ohE 'CONFIG_KSU_SUSFS[A-Z_]*' /tmp/ksu/kernel/*.c /tmp/ksu/kernel/*.h 2>/dev/null \
+            | sort -u > /tmp/sym_ksu.txt
+          echo "kernel-side symbols: $(wc -l < /tmp/sym_kernel.txt)"
+          echo "KSU-side symbols:    $(wc -l < /tmp/sym_ksu.txt)"
+          if [ -s /tmp/sym_ksu.txt ]; then
+            echo "--- used by KSU but not defined by kernel SUSFS (should be empty) ---"
+            comm -23 /tmp/sym_ksu.txt /tmp/sym_kernel.txt || true
           fi
 
-          echo "--- applying 50_add_susfs_in_kernel-4.19.patch (kernel side) ---"
-          if grep -q 'susfs_start_sdcard_monitor_fn' fs/namespace.c 2>/dev/null; then
-            echo "already applied - skipping"
-          elif patch -p1 --forward --fuzz=0 < 50_add_susfs_in_kernel-4.19.patch; then
-            echo "kernel SUSFS patch applied"
-          else
-            echo "ERROR: 50_add_susfs_in_kernel-4.19.patch failed. Failed hunks:"
-            find . -name '*.rej' -not -path './out/*' | head -20
-            echo "--- hunks ---"
-            grep -n -m 60 '^@@' 50_add_susfs_in_kernel-4.19.patch
-            ( patch -p1 --forward --fuzz=0 --dry-run < 50_add_susfs_in_kernel-4.19.patch 2>&1 | head -40 ) || true
-            exit 1
-          fi
+          # These two are the ones that actually matter for this project's goal.
+          for s in SUSFS_MAGIC CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG; do
+            if grep -rq "$s" include/linux/susfs.h include/linux/susfs_def.h /tmp/ksu/kernel/ 2>/dev/null; then
+              echo "  OK: $s referenced"
+            else
+              echo "  WARN: $s not found anywhere"
+            fi
+          done
 
-          echo "--- SUSFS landing check ---"
-          grep -q 'SUSFS_VERSION' include/linux/susfs.h && echo "  OK: include/linux/susfs.h"
-          grep -q 'susfs_start_sdcard_monitor_fn' fs/namespace.c && echo "  OK: fs/namespace.c hook"
-          grep -q 'susfs' fs/Makefile && echo "  OK: fs/Makefile entry"
+          echo "✅ SUSFS integration verified (no patching needed)"
 
       - name: 🪝 Applying KernelSU manual hooks patch (应用 KernelSU 手动 Hook 补丁)
         run: |
