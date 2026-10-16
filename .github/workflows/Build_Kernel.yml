@@ -204,7 +204,7 @@ jobs:
           echo "⚙️ Configure KernelSU Variants: $KSU_VARIANT (配置 KernelSU 变体: $KSU_VARIANT)"
           
           if [ "$KSU_VARIANT" == "SukiSU-Ultra" ]; then
-            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/susfs-dev/kernel/setup.sh" | bash -s susfs-dev
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
           elif [ "$KSU_VARIANT" == "RKSU" ]; then
             curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/susfs-v1.5.5/kernel/setup.sh" | bash -s susfs-v1.5.5
           elif [ "$KSU_VARIANT" == "KernelSU" ]; then
@@ -215,6 +215,46 @@ jobs:
           
           echo "✅ KernelSU configuration complete (KernelSU 配置完成)"
           
+      - name: 🪝 Applying KernelSU manual hooks patch (应用 KernelSU 手动 Hook 补丁)
+        run: |
+          cd "$KERNEL_SOURCE"
+          KSU_VARIANT="${{ github.event.inputs.kernelsu_variant }}"
+
+          if [ "$KSU_VARIANT" != "SukiSU-Ultra" ]; then
+            echo "Skipped: hook patch is only needed for the SukiSU-Ultra builtin branch."
+            exit 0
+          fi
+
+          # 'builtin' only ships drivers/kernelsu/. Its hook call sites
+          # (execveat / faccessat / stat / read / input / devpts) must be added to
+          # the core kernel source. Path '4.19/' is hard-coded: apollo is 4.19.325.
+          PATCH_URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/4.19/ksu_hooks_sukisu_4.19.patch"
+          curl -LSs "$PATCH_URL" -o /tmp/ksu_hooks_419.patch
+          echo "patch size: $(wc -c < /tmp/ksu_hooks_419.patch) bytes"
+
+          if patch -p1 --dry-run --reverse < /tmp/ksu_hooks_419.patch >/dev/null 2>&1; then
+            echo "Hooks patch already applied - skipping."
+          else
+            if patch -p1 --forward --dry-run < /tmp/ksu_hooks_419.patch; then
+              patch -p1 --forward < /tmp/ksu_hooks_419.patch
+              echo "KernelSU manual hooks patch applied"
+            else
+              echo "ERROR: hooks patch does not apply to this tree. Hunks:"
+              grep -n -m 40 '^@@' /tmp/ksu_hooks_419.patch
+              exit 1
+            fi
+          fi
+
+          for symbol in ksu_handle_execveat ksu_handle_stat ksu_handle_faccessat; do
+            if grep -rq "$symbol" "$KERNEL_SOURCE/fs" 2>/dev/null; then
+              echo "  OK: $symbol referenced in fs/"
+            else
+              echo "  FAIL: $symbol NOT found in fs/ - hooks did not land"
+              exit 1
+            fi
+          done
+          echo "Manual hook verification passed"
+
       - name: 🔨 Build the kernel (构建内核)
         run: |
           cd "$KERNEL_SOURCE"
@@ -384,23 +424,22 @@ jobs:
               echo "🔧 Applying SukiSU-Ultra & RKSU Configuration... (应用 SukiSU-Ultra & RKSU 配置)"
               scripts/config --file out/.config \
                   -e KSU \
-                  -e KSU_MANUAL_HOOK \
                   -e KSU_SUSFS \
-                  -e KSU_SUSFS_HAS_MAGIC_MOUNT \
                   -e KSU_SUSFS_SUS_PATH \
                   -e KSU_SUSFS_SUS_MOUNT \
-                  -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-                  -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
                   -e KSU_SUSFS_SUS_KSTAT \
-                  -d KSU_SUSFS_SUS_OVERLAYFS \
-                  -e KSU_SUSFS_TRY_UMOUNT \
-                  -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
                   -e KSU_SUSFS_SPOOF_UNAME \
                   -e KSU_SUSFS_ENABLE_LOG \
                   -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
                   -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
                   -e KSU_SUSFS_OPEN_REDIRECT \
-                  -d KSU_SUSFS_SUS_SU
+                  -e KSU_SUSFS_SUS_MAP
+              # NOTE: KSU_MANUAL_HOOK no longer exists in SukiSU-Ultra (removed in both
+              #       branches). The 'builtin' branch supplies the manual hooks itself.
+              #       The other old KSU_SUSFS_* names (HAS_MAGIC_MOUNT, AUTO_ADD_*,
+              #       TRY_UMOUNT, SUS_OVERLAYFS, SUS_SU) were dropped upstream and are
+              #       rejected by scripts/config, so they are no longer requested here.
+              #       KSU_SUSFS itself depends on THREAD_INFO_IN_TASK (set in defconfig).
           elif [ "$KSU" == "KernelSU" ]; then
               echo "🔧 Applying KernelSU Configuration... (应用 KernelSU 配置)"
               scripts/config --file out/.config \
@@ -440,6 +479,27 @@ jobs:
             sed -i "s/echo \"\$res\"/echo \"${custom_part}\"/g" "$KERNEL_SOURCE/scripts/setlocalversion"
           fi
             
+          # 校验 SukiSU/SUSFS 是否真的进了最终 .config(避免刷完才发现没 root)
+          echo "🔎 Verifying SukiSU / SUSFS landed in out/.config ..."
+          CONFIG_FILE="$KERNEL_SOURCE/out/.config"
+          [ -f "$CONFIG_FILE" ] || { echo "❌ out/.config not found: $CONFIG_FILE"; exit 1; }
+
+          for sym in KSU KSU_SUSFS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KPROBES EXT4_FS; do
+            if grep -qE "^CONFIG_${sym}=y" "$CONFIG_FILE"; then
+              echo "  ✅ CONFIG_${sym}=y"
+            else
+              echo "  ❌ CONFIG_${sym} is NOT y:"
+              grep -E "CONFIG_${sym}([= ]| is not set)" "$CONFIG_FILE" || echo "     (symbol absent from .config)"
+              exit 1
+            fi
+          done
+
+          if [ ! -d "$KERNEL_SOURCE/drivers/kernelsu" ]; then
+            echo "❌ KernelSU sources missing: $KERNEL_SOURCE/drivers/kernelsu not found"
+            exit 1
+          fi
+          echo "✅ KernelSU/SUSFS config verification passed"
+
           # 开始构建
           echo "🚀 Start building the kernel... (开始构建内核)"
           make $MAKE_ARGS -j$(nproc --all) 2>&1 | tee build.log
@@ -466,7 +526,7 @@ jobs:
           if [ "$KSU_VARIANT" == "SukiSU-Ultra" ] && [ "$KPM_ENABLE" == "enable" ]; then
             echo "🛠️ 正在修补 Image 文件..."
             cd "$KERNEL_SOURCE/out/arch/arm64/boot"
-            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch
             chmod 777 patch
             ./patch
             if [ $? -eq 0 ]; then
