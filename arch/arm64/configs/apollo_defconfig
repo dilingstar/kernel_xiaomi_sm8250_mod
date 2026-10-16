@@ -795,10 +795,11 @@ CONFIG_KPROBE_EVENTS=y
 # ---------------------------------------------------------------------------
 # SukiSU-Ultra (builtin branch) + SUSFS   target: apollo / 4.19.325 / MIUI
 # ---------------------------------------------------------------------------
-# NOTE: this small defconfig carries no CONFIG_THREAD_INFO_IN_TASK, and
-#       KSU_SUSFS depends on it. That symbol is set in apollo_stock-defconfig
-#       (which is the one the kernel build actually consumes), so SUSFS stays
-#       enabled there. KSU itself only needs KPROBES + EXT4_FS (both above).
+# NOTE: the CI runs "make apollo_defconfig", so THIS file is the authoritative
+#       one. KSU_SUSFS depends on THREAD_INFO_IN_TASK, which is not listed here;
+#       that dependency is satisfied in the merged .config (the CI step
+#       "Verifying SukiSU / SUSFS landed in out/.config" confirms KSU_SUSFS=y).
+#       KSU itself only needs KPROBES + EXT4_FS, both already set above.
 # ---------------------------------------------------------------------------
 CONFIG_KSU=y
 CONFIG_KSU_DEBUG=n

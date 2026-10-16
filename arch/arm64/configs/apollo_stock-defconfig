@@ -6408,7 +6408,9 @@ CONFIG_KPROBE_EVENTS=y
 # ---------------------------------------------------------------------------
 # SukiSU-Ultra (builtin branch) + SUSFS   target: apollo / 4.19.325 / MIUI
 # ---------------------------------------------------------------------------
-# This is the defconfig the kernel build actually consumes.
+# This file is the full/reference config. The CI builds with
+# "make apollo_defconfig", so apollo_defconfig is the authoritative one; this
+# copy is kept in sync so both stay consistent.
 # Dependencies already satisfied in this file:
 #   CONFIG_KPROBES=y, CONFIG_EXT4_FS=y, CONFIG_KALLSYMS=y,
 #   CONFIG_KALLSYMS_ALL=y, CONFIG_THREAD_INFO_IN_TASK=y (KSU_SUSFS needs it),
