@@ -6404,3 +6404,31 @@ CONFIG_CORESIGHT_TGU=y
 CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_IPC_NS=y
 CONFIG_KPROBE_EVENTS=y
+
+# ---------------------------------------------------------------------------
+# SukiSU-Ultra (builtin branch) + SUSFS   target: apollo / 4.19.325 / MIUI
+# ---------------------------------------------------------------------------
+# This is the defconfig the kernel build actually consumes.
+# Dependencies already satisfied in this file:
+#   CONFIG_KPROBES=y, CONFIG_EXT4_FS=y, CONFIG_KALLSYMS=y,
+#   CONFIG_KALLSYMS_ALL=y, CONFIG_THREAD_INFO_IN_TASK=y (KSU_SUSFS needs it),
+#   CONFIG_HAVE_SYSCALL_TRACEPOINTS=y
+# ---------------------------------------------------------------------------
+CONFIG_KSU=y
+CONFIG_KSU_DEBUG=n
+# CONFIG_KSU_FEATURE_ADBROOT is not set
+
+# --- SUSFS ---
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_SUS_MAP=y
+
+# --- optional, off by default (needs 64-bit; may affect stability) ---
+# CONFIG_KPM is not set

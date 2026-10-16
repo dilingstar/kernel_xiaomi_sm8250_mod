@@ -791,3 +791,30 @@ CONFIG_SQUASHFS=y
 CONFIG_BINFMT_MISC=y
 CONFIG_KPROBES=y
 CONFIG_KPROBE_EVENTS=y
+
+# ---------------------------------------------------------------------------
+# SukiSU-Ultra (builtin branch) + SUSFS   target: apollo / 4.19.325 / MIUI
+# ---------------------------------------------------------------------------
+# NOTE: this small defconfig carries no CONFIG_THREAD_INFO_IN_TASK, and
+#       KSU_SUSFS depends on it. That symbol is set in apollo_stock-defconfig
+#       (which is the one the kernel build actually consumes), so SUSFS stays
+#       enabled there. KSU itself only needs KPROBES + EXT4_FS (both above).
+# ---------------------------------------------------------------------------
+CONFIG_KSU=y
+CONFIG_KSU_DEBUG=n
+# CONFIG_KSU_FEATURE_ADBROOT is not set
+
+# --- SUSFS ---
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_SUS_MAP=y
+
+# --- optional, off by default (needs 64-bit; may affect stability) ---
+# CONFIG_KPM is not set
